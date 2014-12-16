@@ -1,0 +1,392 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import division, print_function, unicode_literals
+
+import functools
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as tick
+from scipy import stats
+
+aspect = 1/1.618
+resolution = 72.27
+columnwidth = 246/resolution
+textwidth = 510/resolution
+textiny, texsmall, texnormal = 8., 9.25, 10.
+offblack = '#262626'
+
+plt.rcdefaults()
+plt.rcParams.update({
+    'font.family': ['CMU Serif'],
+    'font.size': texsmall,
+    'legend.fontsize': 8.5,
+    'axes.labelsize': texsmall,
+    'axes.titlesize': texsmall,
+    'xtick.labelsize': textiny,
+    'ytick.labelsize': textiny,
+    'lines.linewidth': .9,
+    'patch.linewidth': .9,
+    'axes.linewidth': .5,
+    'text.color': offblack,
+    'axes.edgecolor': offblack,
+    'axes.labelcolor': offblack,
+    'xtick.color': offblack,
+    'ytick.color': offblack,
+    'xtick.major.size': 2,
+    'ytick.major.size': 2,
+    'xtick.major.pad': 1.8,
+    'ytick.major.pad': 1.8,
+    'legend.numpoints': 1,
+    'legend.scatterpoints': 1,
+    'legend.frameon': False,
+    'pdf.fonttype': 42
+})
+
+pmean_colors = {
+    1: (0.3333333333333333, 0.6588235294117647, 0.40784313725490196),
+    0: (0.2980392156862745, 0.4470588235294118, 0.6901960784313725),
+    -1: (0.7686274509803922, 0.3058823529411765, 0.3215686274509804)
+}
+
+pmean_labels = {
+    p: '{}: $p = {}$'.format(name, p) for (p, name) in (
+        (1, 'Arithmetic'),
+        (0, 'Geometric'),
+        (-1, 'Harmonic')
+    )
+}
+
+
+def plotfn(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        print(f.__name__)
+        f(*args, **kwargs)
+        plt.savefig('{}.pdf'.format(f.__name__))
+        plt.close()
+    return wrapper
+
+
+def despine(ax=None, remove_ticks=False):
+    if ax is None:
+        ax = plt.gca()
+    for spine in 'top', 'right':
+        ax.spines[spine].set_visible(False)
+    if remove_ticks:
+        for ax_name in 'xaxis', 'yaxis':
+            getattr(ax, ax_name).set_ticks_position('none')
+    else:
+        ax.xaxis.set_ticks_position('bottom')
+        ax.yaxis.set_ticks_position('left')
+
+
+@plotfn
+def saturation():
+    plt.figure(figsize=(columnwidth, .9*columnwidth*aspect))
+
+    A = np.linspace(0, 5, 1000)
+    B = np.ones_like(A)
+
+    means = (
+        ((A+B)/2, 1),
+        (np.sqrt(A*B), 0),
+        (2*A*B/(A+B), -1)
+    )
+
+    for M, p in means:
+        plt.plot(A, M, color=pmean_colors[p], label=pmean_labels[p])
+
+    plt.xlabel('$T_A$')
+    plt.ylabel('$T_R(T_A, 1)$')
+    plt.xticks(range(6))
+    plt.yticks(range(4))
+    plt.gca().set_aspect('equal')
+    plt.ylim(0, 2.5)
+    plt.legend(loc='best')
+
+    despine(remove_ticks=True)
+    plt.tight_layout(pad=0)
+
+
+def load_from_cache(fn, unpack=False, usecols=None):
+    try:
+        return np.load(fn + '.npy')
+    except IOError:
+        arr = np.loadtxt(fn + '.dat', unpack=unpack, usecols=usecols)
+        np.save(fn + '.npy', arr)
+        return arr
+
+
+experiment = 'ALICE'
+
+
+@plotfn
+def multdist():
+    systems = ('p', 'p'), ('p', 'Pb'), ('Pb', 'Pb')
+    energies = 2.36, 5.02, 2.76
+    color = pmean_colors[0]
+    fig, axes = plt.subplots(ncols=len(systems),
+                             figsize=(textwidth, textwidth*aspect/2))
+
+    for ax, system, energy in zip(axes, systems, energies):
+        ax.set_yscale('log')
+
+        mult = load_from_cache(
+            'data/trento/multdist/{}{}-m0-k0.8-w0.6'.format(*system),
+            usecols=(3,)
+        )
+
+        label = '{} {} TeV'.format(experiment, energy)
+
+        if system == ('p', 'p'):
+            x, y, stat, sys = np.loadtxt(
+                'data/exp/{}-{}{}-multdist.dat'.format(experiment, *system),
+                usecols=(0, 3, 4, 6))[1:].T
+
+            ax.errorbar(x, y, yerr=stat, fmt='o', markersize=2,
+                        markeredgewidth=0, capsize=0, elinewidth=.4,
+                        color='.3', label=label+' NSD')
+
+            # Interpret trento mult as <Nch>.  If
+            #   (N - 1/2) <= mult < (N + 1/2),
+            # then Nch = N, so e.g.
+            #  0.5 <= mult < 1.5  -->  Nch = 1.
+            # Now rescale trento mult so that events with 0.5 < mult < 50.5
+            # (1 <= Nch <= 50) have the same mean as the exp data, which covers
+            # the same Nch range.
+
+            exp_mean = np.inner(x, y) / y.sum()
+            _trento_mean = lambda: mult[(mult > .5) & (mult < 50.5)].mean()
+            trento_mean = _trento_mean()
+            norm = 1.
+            while abs(trento_mean - exp_mean) > 1e-6:
+                _norm = exp_mean / trento_mean
+                norm *= _norm
+                mult *= _norm
+                trento_mean = _trento_mean()
+
+            # match bins to experiment
+            bins = np.concatenate((
+                np.arange(.5, 41.), np.arange(42.5, 51., 2.)
+            ))
+            counts = np.histogram(mult, bins=bins, density=True)[0]
+            # repeat the first bin count just so the step plot looks right
+            # (not actually changing the data)
+            counts = np.insert(counts, 0, counts[0])
+            ax.step(bins, counts*y.sum(), where='pre', color=color,
+                    label=r'$T_R$, norm = {:.1f}'.format(norm))
+
+            ax.set_xlim(xmax=52)
+            ax.set_ylim(ymin=.45*y.min())
+
+            ax.annotate(r'$|\eta| < 1$, $p_T$ corrected',
+                        (.145, .035), xycoords='axes fraction',
+                        ha='left', va='bottom')
+        else:
+            xmin, xmax, nch, pdf, ccdf = np.loadtxt(
+                'data/exp/{}-{}{}-multdist.dat'.format(experiment, *system),
+                unpack=True
+            )
+
+            w = xmax - xmin
+            z = pdf/w
+            ax.errorbar(nch, z, xerr=.06*nch, yerr=.035*z,
+                        fmt='o', markersize=2, markeredgewidth=0,
+                        capsize=0, elinewidth=.4, color='.3',
+                        label=label)
+
+            if system == ('p', 'Pb'):
+                norm = 18.2
+                pnorm = 1.23
+                bins = 60
+                xmax = 200
+            else:
+                norm = 16.3
+                pnorm = 1.31
+                bins = 100
+                xmax = 3600
+
+            counts, edges = np.histogram(norm*mult, bins=bins, density=True)
+            ax.step(edges[:-1], pnorm*counts, where='post', color=color,
+                    label=r'$T_R$, norm = {:.1f}'.format(norm))
+
+            ax.set_xlim(0, xmax)
+            ax.set_ylim(ymin=.5*z.min())
+
+            ax.annotate(r'$|\eta| < 1$, $0.2 < p_T < 3.0$ GeV',
+                        (.145, .035), xycoords='axes fraction',
+                        ha='left', va='bottom')
+
+        ax.xaxis.set_major_locator(tick.MaxNLocator(4))
+        ax.yaxis.set_major_locator(
+            tick.LogLocator(base=10 if system == ('p', 'p') else 100)
+        )
+        ax.set_xlabel(r'$N_\mathrm{ch}$')
+        if ax.is_first_col():
+            ax.set_ylabel(r'$P(N_\mathrm{ch})$')
+        ax.set_title('+'.join(system), x=.5, y=.9)
+
+        despine(ax)
+        ax.minorticks_off()
+        ax.legend(loc=(.02, .12), handlelength=1)
+
+    plt.tight_layout(pad=0, w_pad=.1)
+
+
+@plotfn
+def uranium():
+    color = pmean_colors[0]
+    linecolor = tuple(.6*i for i in color)
+    plot_cents = 0.001, 0.01
+    bins = 20
+    bin_range = .85, 1.15
+
+    systems = 'UU', 'AuAu'
+
+    #              UU 0.125% 1%     AuAu 0.125% 1%
+    glb_slopes = (-0.270, -0.145), (0.0296, 0.0106)
+    glb_color = '.6'
+
+    fig, axes = plt.subplots(nrows=2, sharex='col',
+                             figsize=(columnwidth, columnwidth*aspect*1.75))
+
+    for system, gslopes in zip(systems, glb_slopes):
+        # load data for mininum bias and impact parameter cut
+        # columns: impact npart mult e2
+        minbias, bcut = (
+            load_from_cache(
+                'data/trento/uranium/'
+                '{}_p=0_k=0.625_w=0.5_{}'.format(system, suffix),
+                usecols=(1, 2, 3, 4))
+            for suffix in ('minbias', 'bcut=3')
+        )
+
+        # find centrality cut for b < 3.
+        impact = minbias[:, 0]
+        cent_cut = np.count_nonzero(impact < 3.) / impact.size
+
+        # sort by npart and select mult, e2 columns
+        minbias = minbias[minbias[:, 1].argsort()][::-1, 2:]
+        bcut = bcut[bcut[:, 1].argsort()][::-1, 2:]
+
+        for ax, cent, gslope in zip(axes, plot_cents, gslopes):
+            Nminbias = int(minbias.shape[0] * cent)
+            Nbcut = int(bcut.shape[0] * cent / cent_cut)
+            mult, e2 = np.concatenate((minbias[:Nminbias], bcut[:Nbcut])).T
+            mult /= mult.mean()
+
+            counts, edges = np.histogram(mult, bins, range=bin_range)
+            counts[counts == 0] = 1
+            e2avg = np.histogram(mult, bins=edges, weights=e2)[0] / counts
+            e2err = np.sqrt(
+                np.histogram(mult, bins=edges, weights=e2*e2)[0]
+            ) / counts
+            middles = (edges[1:] + edges[:-1])/2
+            ax.errorbar(middles, e2avg, yerr=e2err,
+                        fmt='o', ms=3.5, color=color,
+                        markeredgecolor='none', capsize=0)
+
+            cut = (mult > 0.9) & (mult < 1.1)
+            slope, intercept = stats.linregress(mult[cut], e2[cut])[:2]
+            X = np.linspace(.9, 1.1, 200)
+            trentoline = ax.plot(X, slope*X + intercept, color=linecolor)[0]
+
+            gintercept = slope*1 + intercept - gslope
+            glbline = ax.plot(X, gslope*X + gintercept, color=glb_color)[0]
+
+    for ax, cent_max in zip(axes, plot_cents):
+        ax.set_xlim(bin_range)
+        if ax.is_last_row():
+            ax.set_xticks(np.r_[.9:1.1:3j])
+            ax.set_xlabel(r'$N_\mathrm{ch}/\langle N_\mathrm{ch} \rangle$')
+
+        ax.set_ylim([0.04, 0.20])
+        ax.set_yticks((.06, .12, .18))
+        ax.set_ylabel(r'$\varepsilon_2$')
+        if ax.is_first_row():
+            UU_text_y = .127
+            AuAu_text_y = .086
+        else:
+            UU_text_y = .130
+            AuAu_text_y = .088
+        ax.text(.9, UU_text_y, 'U+U', ha='left', va='top')
+        ax.text(.9, AuAu_text_y, 'Au+Au', ha='left', va='bottom')
+        ax.annotate('0–{:g}% spectators'.format(round(100*cent_max, 1)),
+                    (.5, .05), xycoords='axes fraction',
+                    ha='center', va='bottom')
+        despine(ax)
+
+    axes[0].legend((trentoline, glbline), ('TRENTO', 'Glauber+NBD'),
+                   loc=(.55, .75), ncol=1,
+                   handlelength=1.3, columnspacing=1.2)
+
+    plt.tight_layout(pad=0)
+
+
+@plotfn
+def eccentricity():
+    fig, axes = plt.subplots(ncols=3,
+                             figsize=(textwidth, .40*aspect*textwidth))
+
+    e2_ax, e3_ax, ratio_ax = axes
+
+    bins = 20
+    cent_mid = np.linspace(0, 100, bins, endpoint=False) + 50/bins
+
+    for p in 1, 0, -1:
+        color = pmean_colors[p]
+        label = pmean_labels[p]
+
+        eccentricity = load_from_cache(
+            'data/trento/eccentricity/PbPb_m={}_k=0.8_w=0.6'.format(p),
+            usecols=(4, 5)
+        ).T.reshape(2, bins, -1)
+
+        for n, (ax, ecc) in enumerate(zip(axes, eccentricity), start=2):
+            ax.plot(cent_mid, ecc.mean(axis=1), color=color, label=label)
+            ax.set_ylim(0, .62)
+            if n == 2:
+                ymax = .6
+                label_pos = .08, .87
+                ax.set_ylabel(r'$\varepsilon_n$')
+            else:
+                ymax = .6
+                label_pos = .08, .52
+                ax.legend(loc='upper left', bbox_to_anchor=(.03, 1.1),
+                          fontsize=8, labelspacing=.33)
+            ax.set_yticks(np.arange(0, ymax+.01, .2))
+            ax.spines['left'].set_bounds(0, ymax)
+            ax.annotate(r'$\varepsilon_{}$'.format(n), label_pos, size=10,
+                        xycoords='axes fraction', ha='left', va='top')
+
+        ecc_rms = np.sqrt(np.mean(np.square(eccentricity), axis=-1))
+        ratio_ax.plot(cent_mid, ecc_rms[0]/ecc_rms[1]**0.6, color=color)
+
+    ratio_data = np.loadtxt('data/exp/eccentricity_ratio.dat',
+                            usecols=range(4), unpack=True)
+    cent_mid = ratio_data[:2].mean(axis=0)
+    ratio_min, ratio_max = ratio_data[2:]
+
+    ratio_ax.fill_between(cent_mid, ratio_min, ratio_max,
+                          color='.5', edgecolor='none', alpha=0.3, zorder=-1)
+    ratio_ax.set_xlim(0, 40)
+    ratio_ax.set_ylim(.3, 1.2)
+    ratio_ax.set_yticks((.3, .6, .9, 1.2))
+    ratio_ax.annotate('Ratio', (.08, .87), xycoords='axes fraction',
+                      ha='left', va='top')
+
+    for ax in axes:
+        ax.xaxis.set_major_locator(tick.MaxNLocator(4))
+        ax.set_xlabel('Centrality %')
+        despine(ax)
+
+    plt.tight_layout(pad=.01, w_pad=.5)
+
+
+if __name__ == "__main__":
+    saturation()
+    multdist()
+    uranium()
+    eccentricity()
